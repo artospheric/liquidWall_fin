@@ -16,9 +16,20 @@ const shaderSettings = {
     u_noiseIntensity: 0.2,
     u_decaySpeed: 0.015,
     holoStrength: 0.6,
-    u_grainScale: 1.30,      
-    u_grainIntensity: 0.1,
-    u_displacementStrength: 0.2
+    // New default values from the image
+    u_grainScale: 1.75,      
+    u_grainIntensity: 0.42,
+    u_displacementStrength: 0.2,
+    u_blendMode: 2.0, // 'Screen' is index 2
+    u_grainContrastLarge: 1.05, // Updated
+    u_grainContrastMedium: 2.29, // Updated
+    u_grainContrastSmall: 2.18, // Updated
+    u_grainBrightness: -0.28,
+    u_patternScale: 0.88, // Updated
+    // New controls for toggling grain layers
+    u_largeGrainEnabled: true,
+    u_mediumGrainEnabled: true,
+    u_smallGrainEnabled: true
 };
 
 const fragmentShaderSource = `#define PI 3.141592654
@@ -40,6 +51,17 @@ uniform float u_holoStrength;
 uniform float u_grainScale;
 uniform float u_grainIntensity;
 uniform float u_displacementStrength;
+uniform float u_blendMode;
+uniform float u_grainContrastLarge;
+uniform float u_grainContrastMedium;
+uniform float u_grainContrastSmall;
+uniform float u_grainBrightness;
+uniform float u_patternScale;
+
+// New uniform variables for enabling/disabling grain layers
+uniform float u_largeGrainEnabled;
+uniform float u_mediumGrainEnabled;
+uniform float u_smallGrainEnabled;
 
 uniform vec3 u_colors[10];
 
@@ -57,10 +79,17 @@ float rand3d(vec3 p) {
     return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
 }
 
-float perlin_noise_3d(vec3 p) {
+// Улучшенная версия Perlin noise с более плавными переходами
+float smootherstep(float t) {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+float perlin_noise_3d_improved(vec3 p) {
     vec3 ip = floor(p);
     vec3 fp = fract(p);
-    vec3 uv = fp * fp * (3.0 - 2.0 * fp);
+    
+    // Используем более плавную интерполяцию
+    vec3 uv = vec3(smootherstep(fp.x), smootherstep(fp.y), smootherstep(fp.z));
     
     float a = rand3d(ip);
     float b = rand3d(ip + vec3(1.0, 0.0, 0.0));
@@ -75,6 +104,28 @@ float perlin_noise_3d(vec3 p) {
     float k1 = mix(mix(e, f, uv.x), mix(g, h, uv.x), uv.y);
     
     return mix(k0, k1, uv.z);
+}
+
+// Функция для создания многооктавного шума
+float fbm_3d(vec3 p, int octaves) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    
+    for (int i = 0; i < 4; i++) {
+        if (i >= octaves) break;
+        value += amplitude * perlin_noise_3d_improved(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+        // Добавляем небольшое смещение для каждой октавы
+        p += vec3(0.1, 0.1, 0.1);
+    }
+    
+    return value;
+}
+
+float perlin_noise_3d(vec3 p) {
+    return perlin_noise_3d_improved(p);
 }
 
 float perlin_noise_2d(vec2 p) {
@@ -142,7 +193,7 @@ float myHeight(vec2 uv, float iTime, vec2 u_decayedMousePosition) {
         float mouse_speed_effect = u_mouseEffectIntensity * mouse_influence;
         c.zx = rot(c.zx, 0.1 + current_time * 0.1 * wt + (swirl_uv.x + .7) * 23. * wp + mouse_speed_effect);
         c.xy = rot(c.xy, c.z * c.x * wb + 1.7 + current_time * wt + (swirl_uv.y + 1.1) * 15. * wp + mouse_speed_effect);
-        c.yz = rot(c.yz, c.x * c.y * wb + 2.4 - current_time * 0.79 * wt + (swirl_uv.x + swirl_uv.y * (fract(i / 2.) - 0.25) * 4.) * 17. * wp + mouse_speed_effect);
+        c.yz = rot(c.yz, c.x * c.y * wb + 2.4 - current_time * 0.65 * wt + (swirl_uv.x + swirl_uv.y * (fract(i / 2.) - 0.25) * 4.) * 17. * wp + mouse_speed_effect);
         c.zx = rot(c.zx, c.y * c.z * wb + 1.6 - current_time * 0.65 * wt + (swirl_uv.x + .7) * 23. * wp + mouse_speed_effect);
         float w = (100.5 - i / N);
         c0 += c * w;
@@ -176,6 +227,24 @@ vec3 holoOverlay(vec2 uv, vec3 n, vec3 v, vec3 l) {
     return rainbow * fres * spec;
 }
 
+vec3 blend(vec3 base, vec3 blend_color, float mode) {
+    if (mode == 0.0) { // Normal
+        return base + blend_color;
+    } else if (mode == 1.0) { // Multiply
+        return base * blend_color;
+    } else if (mode == 2.0) { // Screen
+        return 1.0 - (1.0 - base) * (1.0 - blend_color);
+    } else if (mode == 3.0) { // Overlay
+        return mix(base * blend_color * 2.0, 1.0 - (1.0 - base) * (1.0 - blend_color) * 2.0, step(vec3(0.5), base));
+    } else if (mode == 4.0) { // Hard Light
+        return mix(base * blend_color * 2.0, 1.0 - (1.0 - base) * (1.0 - blend_color) * 2.0, step(vec3(0.5), blend_color));
+    } else if (mode == 5.0) { // Soft Light
+        vec3 grain_factor = blend_color * 2.0 - 1.0;
+        return mix(base - (1.0 - 2.0 * grain_factor) * base * (1.0 - base), base + grain_factor * (1.0 - (2.0 * base - 1.0) * (2.0 * base - 1.0)), step(vec3(0.5), grain_factor));
+    }
+    return base;
+}
+
 void main() {
     vec2 uv = (gl_FragCoord.xy / iResolution.y) * u_scale;
 
@@ -190,19 +259,45 @@ void main() {
     vec2 displaced_coord_medium = gl_FragCoord.xy + displacement_vector * 150.0;
     vec2 displaced_coord_small = gl_FragCoord.xy + displacement_vector * 200.0;
     
-    vec3 grain_pos_large = vec3(displaced_coord_large * u_grainScale * 0.3, grain_time_large);
-    vec3 grain_pos_medium = vec3(displaced_coord_medium * u_grainScale * 0.5, grain_time_medium * 1.2);
-    vec3 grain_pos_small = vec3(displaced_coord_small * u_grainScale * 0.8, grain_time_small * 1.5);
+    // Используем улучшенную версию шума с множественными октавами
+    float grain_noise_large = 0.0;
+    if (u_largeGrainEnabled > 0.5) {
+        grain_noise_large = fbm_3d(vec3(displaced_coord_large * u_grainScale * 0.3 * u_patternScale, grain_time_large), 3);
+        float detail_noise_large = perlin_noise_3d_improved(vec3(displaced_coord_large * u_grainScale * 0.3 * u_patternScale, grain_time_large) * 4.0 + vec3(100.0)) * 0.1;
+        grain_noise_large = clamp(grain_noise_large + detail_noise_large, 0.0, 1.0);
+    }
+
+    float grain_noise_medium = 0.0;
+    if (u_mediumGrainEnabled > 0.5) {
+        grain_noise_medium = fbm_3d(vec3(displaced_coord_medium * u_grainScale * 0.5 * u_patternScale, grain_time_medium * 1.2), 2);
+        float detail_noise_medium = perlin_noise_3d_improved(vec3(displaced_coord_medium * u_grainScale * 0.5 * u_patternScale, grain_time_medium * 1.2) * 6.0 + vec3(200.0)) * 0.08;
+        grain_noise_medium = clamp(grain_noise_medium + detail_noise_medium, 0.0, 1.0);
+    }
     
-    float grain_noise_large = perlin_noise_3d(grain_pos_large);
-    float grain_noise_medium = perlin_noise_3d(grain_pos_medium);
-    float grain_noise_small = perlin_noise_3d(grain_pos_small);
+    float grain_noise_small = 0.0;
+    if (u_smallGrainEnabled > 0.5) {
+        grain_noise_small = fbm_3d(vec3(displaced_coord_small * u_grainScale * 2.4 * u_patternScale, grain_time_small * 1.5), 2);
+        float detail_noise_small = perlin_noise_3d_improved(vec3(displaced_coord_small * u_grainScale * 2.4 * u_patternScale, grain_time_small * 1.5) * 8.0 + vec3(300.0)) * 0.05;
+        grain_noise_small = clamp(grain_noise_small + detail_noise_small, 0.0, 1.0);
+    }
     
-    float noise_seed = rand(gl_FragCoord.xy + sin(iTime * 0.1) * 0.1);
-    float grain_noise = 
-        (grain_noise_large * (0.5 + noise_seed * 0.)) + 
-        (grain_noise_medium * (0.5 + (1.0 - noise_seed) * 0.5)) +
-        (grain_noise_small * 0.2);
+    // Apply individual contrast to each grain layer
+    float contrasted_grain_noise_large = pow(grain_noise_large, u_grainContrastLarge);
+    float contrasted_grain_noise_medium = pow(grain_noise_medium, u_grainContrastMedium);
+    float contrasted_grain_noise_small = pow(grain_noise_small, u_grainContrastSmall);
+    
+    // Добавляем плавную вариацию для устранения артефактов
+    float noise_seed = rand(gl_FragCoord.xy * 0.001 + sin(iTime * 0.1) * 0.1);
+    float smooth_variation = sin(gl_FragCoord.x * 0.01 + iTime * 0.5) * sin(gl_FragCoord.y * 0.013 + iTime * 0.3) * 0.1;
+    
+    float combined_grain_noise = 
+        (contrasted_grain_noise_large * (0.5 + noise_seed * 0.1)) + 
+        (contrasted_grain_noise_medium * (0.5 + (1.0 - noise_seed) * 0.3)) +
+        (contrasted_grain_noise_small * 0.2) +
+        smooth_variation;
+    
+    // Apply brightness to the combined noise
+    float adjusted_grain_noise = clamp(combined_grain_noise + u_grainBrightness, 0.0, 1.0);
 
     float height_value = myHeight(uv, iTime, u_decayedMousePosition);
     
@@ -218,7 +313,8 @@ void main() {
     vec3 holo = holoOverlay(uv, n, viewDir, light_direction);
     final_color += u_holoStrength * holo;
 
-    final_color += grain_noise * u_grainIntensity * (0.8 + displacement * 2.0);
+    vec3 normalized_grain = vec3(adjusted_grain_noise * u_grainIntensity * (0.8 + displacement * 2.0));
+    final_color = blend(final_color, normalized_grain, u_blendMode);
 
     gl_FragColor = vec4(final_color, 1.0);
 }`;
@@ -238,7 +334,146 @@ function hexToRgb(hex) {
     return [r, g, b];
 }
 
+function createSlider(min, max, step, value, onInput) {
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = min;
+    slider.max = max;
+    slider.step = step;
+    slider.value = value;
+    slider.addEventListener('input', onInput);
+    return slider;
+}
+
+function createCheckbox(labelText, checked, onInput) {
+    const container = document.createElement('div');
+    const label = document.createElement('label');
+    label.innerText = labelText;
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = checked;
+    checkbox.addEventListener('change', onInput);
+    container.appendChild(label);
+    container.appendChild(checkbox);
+    return container;
+}
+
 function startRendering() {
+    // Add UI elements
+    const uiContainer = document.createElement('div');
+    uiContainer.style.position = 'absolute';
+    uiContainer.style.top = '10px';
+    uiContainer.style.left = '10px';
+    uiContainer.style.color = '#fff';
+    uiContainer.style.fontFamily = 'sans-serif';
+    uiContainer.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+    uiContainer.style.padding = '10px';
+    uiContainer.style.borderRadius = '5px';
+    uiContainer.style.display = 'grid';
+    uiContainer.style.gridTemplateColumns = 'auto 1fr auto';
+    uiContainer.style.gap = '5px 10px';
+    uiContainer.style.alignItems = 'center';
+
+    // Blend mode select
+    const blendModeLabel = document.createElement('label');
+    blendModeLabel.innerText = 'Blend Mode: ';
+    blendModeLabel.htmlFor = 'blendModeSelect';
+    const blendModeSelect = document.createElement('select');
+    blendModeSelect.id = 'blendModeSelect';
+    
+    const modes = [{ name: 'Normal', value: 0.0 }, { name: 'Screen', value: 2.0 }];
+    modes.forEach(mode => {
+        const option = document.createElement('option');
+        option.value = mode.value;
+        option.innerText = mode.name;
+        blendModeSelect.appendChild(option);
+    });
+    blendModeSelect.value = shaderSettings.u_blendMode;
+    blendModeSelect.addEventListener('change', (e) => {
+        shaderSettings.u_blendMode = parseFloat(e.target.value);
+    });
+    uiContainer.appendChild(blendModeLabel);
+    uiContainer.appendChild(blendModeSelect);
+    uiContainer.appendChild(document.createElement('div')); // Placeholder for grid alignment
+
+    // Grain Scale Slider
+    const grainScaleLabel = document.createElement('label');
+    grainScaleLabel.innerText = 'Grain Scale: ';
+    const grainScaleSlider = createSlider('0.1', '5.0', '0.01', shaderSettings.u_grainScale, (e) => {
+        shaderSettings.u_grainScale = parseFloat(e.target.value);
+        grainScaleValue.innerText = e.target.value;
+    });
+    const grainScaleValue = document.createElement('span');
+    grainScaleValue.innerText = shaderSettings.u_grainScale;
+    uiContainer.appendChild(grainScaleLabel);
+    uiContainer.appendChild(grainScaleSlider);
+    uiContainer.appendChild(grainScaleValue);
+
+    // Grain Intensity Slider
+    const grainIntensityLabel = document.createElement('label');
+    grainIntensityLabel.innerText = 'Grain Intensity: ';
+    const grainIntensitySlider = createSlider('0.0', '1.0', '0.01', shaderSettings.u_grainIntensity, (e) => {
+        shaderSettings.u_grainIntensity = parseFloat(e.target.value);
+        grainIntensityValue.innerText = e.target.value;
+    });
+    const grainIntensityValue = document.createElement('span');
+    grainIntensityValue.innerText = shaderSettings.u_grainIntensity;
+    uiContainer.appendChild(grainIntensityLabel);
+    uiContainer.appendChild(grainIntensitySlider);
+    uiContainer.appendChild(grainIntensityValue);
+
+    // Grain Contrast Sliders
+    const largeContrastLabel = document.createElement('label');
+    largeContrastLabel.innerText = 'Large Grain Contrast: ';
+    const largeContrastSlider = createSlider('0.1', '3.0', '0.01', shaderSettings.u_grainContrastLarge, (e) => {
+        shaderSettings.u_grainContrastLarge = parseFloat(e.target.value);
+        largeContrastValue.innerText = e.target.value;
+    });
+    const largeContrastValue = document.createElement('span');
+    largeContrastValue.innerText = shaderSettings.u_grainContrastLarge;
+    uiContainer.appendChild(largeContrastLabel);
+    uiContainer.appendChild(largeContrastSlider);
+    uiContainer.appendChild(largeContrastValue);
+
+    const mediumContrastLabel = document.createElement('label');
+    mediumContrastLabel.innerText = 'Medium Grain Contrast: ';
+    const mediumContrastSlider = createSlider('0.1', '3.0', '0.01', shaderSettings.u_grainContrastMedium, (e) => {
+        shaderSettings.u_grainContrastMedium = parseFloat(e.target.value);
+        mediumContrastValue.innerText = e.target.value;
+    });
+    const mediumContrastValue = document.createElement('span');
+    mediumContrastValue.innerText = shaderSettings.u_grainContrastMedium;
+    uiContainer.appendChild(mediumContrastLabel);
+    uiContainer.appendChild(mediumContrastSlider);
+    uiContainer.appendChild(mediumContrastValue);
+
+    const smallContrastLabel = document.createElement('label');
+    smallContrastLabel.innerText = 'Small Grain Contrast: ';
+    const smallContrastSlider = createSlider('0.1', '3.0', '0.01', shaderSettings.u_grainContrastSmall, (e) => {
+        shaderSettings.u_grainContrastSmall = parseFloat(e.target.value);
+        smallContrastValue.innerText = e.target.value;
+    });
+    const smallContrastValue = document.createElement('span');
+    smallContrastValue.innerText = shaderSettings.u_grainContrastSmall;
+    uiContainer.appendChild(smallContrastLabel);
+    uiContainer.appendChild(smallContrastSlider);
+    uiContainer.appendChild(smallContrastValue);
+
+    // Grain Brightness Slider
+    const brightnessLabel = document.createElement('label');
+    brightnessLabel.innerText = 'Grain Brightness: ';
+    const brightnessSlider = createSlider('-1.0', '1.0', '0.01', shaderSettings.u_grainBrightness, (e) => {
+        shaderSettings.u_grainBrightness = parseFloat(e.target.value);
+        brightnessValue.innerText = e.target.value;
+    });
+    const brightnessValue = document.createElement('span');
+    brightnessValue.innerText = shaderSettings.u_grainBrightness;
+    uiContainer.appendChild(brightnessLabel);
+    uiContainer.appendChild(brightnessSlider);
+    uiContainer.appendChild(brightnessValue);
+    
+    document.body.appendChild(uiContainer);
+
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
     const program = createProgram(gl, vertexShader, fragmentShader);
@@ -258,6 +493,17 @@ function startRendering() {
     const grainScaleLocation = gl.getUniformLocation(program, "u_grainScale");
     const grainIntensityLocation = gl.getUniformLocation(program, "u_grainIntensity");
     const displacementStrengthLocation = gl.getUniformLocation(program, "u_displacementStrength");
+    const blendModeLocation = gl.getUniformLocation(program, "u_blendMode");
+    const grainContrastLargeLocation = gl.getUniformLocation(program, "u_grainContrastLarge");
+    const grainContrastMediumLocation = gl.getUniformLocation(program, "u_grainContrastMedium");
+    const grainContrastSmallLocation = gl.getUniformLocation(program, "u_grainContrastSmall");
+    const grainBrightnessLocation = gl.getUniformLocation(program, "u_grainBrightness");
+    const patternScaleLocation = gl.getUniformLocation(program, "u_patternScale");
+    // New uniform locations
+    const largeGrainEnabledLocation = gl.getUniformLocation(program, "u_largeGrainEnabled");
+    const mediumGrainEnabledLocation = gl.getUniformLocation(program, "u_mediumGrainEnabled");
+    const smallGrainEnabledLocation = gl.getUniformLocation(program, "u_smallGrainEnabled");
+
     const colorsUniformLocation = gl.getUniformLocation(program, "u_colors[0]");
 
     const defaultColors = [
@@ -325,6 +571,16 @@ function startRendering() {
         gl.uniform1f(grainScaleLocation, shaderSettings.u_grainScale);
         gl.uniform1f(grainIntensityLocation, shaderSettings.u_grainIntensity);
         gl.uniform1f(displacementStrengthLocation, shaderSettings.u_displacementStrength);
+        gl.uniform1f(blendModeLocation, shaderSettings.u_blendMode);
+        gl.uniform1f(grainContrastLargeLocation, shaderSettings.u_grainContrastLarge);
+        gl.uniform1f(grainContrastMediumLocation, shaderSettings.u_grainContrastMedium);
+        gl.uniform1f(grainContrastSmallLocation, shaderSettings.u_grainContrastSmall);
+        gl.uniform1f(grainBrightnessLocation, shaderSettings.u_grainBrightness);
+        gl.uniform1f(patternScaleLocation, shaderSettings.u_patternScale);
+        // Set new uniform values
+        gl.uniform1f(largeGrainEnabledLocation, shaderSettings.u_largeGrainEnabled ? 1.0 : 0.0);
+        gl.uniform1f(mediumGrainEnabledLocation, shaderSettings.u_mediumGrainEnabled ? 1.0 : 0.0);
+        gl.uniform1f(smallGrainEnabledLocation, shaderSettings.u_smallGrainEnabled ? 1.0 : 0.0);
 
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         requestAnimationFrame(render);
